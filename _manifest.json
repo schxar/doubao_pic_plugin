@@ -1,11 +1,11 @@
 {
   "manifest_version": 1,
   "name": "豆包图片生成插件 (Doubao Image Generator)",
-  "version": "2.0.0",
+  "version": "2.0.1",
   "description": "基于火山引擎豆包模型的AI图片生成插件，支持智能LLM判定、高质量图片生成、结果缓存和多尺寸支持。",
   "author": {
-    "name": "MaiBot团队",
-    "url": "https://github.com/MaiM-with-u"
+    "name": "Schxar",
+    "url": "https://github.com/schxar/doubao_pic_plugin"
   },
   "license": "GPL-v3.0-or-later",
   
@@ -13,8 +13,8 @@
     "min_version": "0.8.0",
     "max_version": "0.8.0"
   },
-  "homepage_url": "https://github.com/MaiM-with-u/maibot",
-  "repository_url": "https://github.com/MaiM-with-u/maibot",
+  "homepage_url": "https://github.com/schxar/doubao_pic_plugin",
+  "repository_url": "https://github.com/schxar/doubao_pic_plugin",
   "keywords": ["ai", "image", "generation", "doubao", "volcengine", "art"],
   "categories": ["AI Tools", "Image Processing", "Content Generation"],
   
