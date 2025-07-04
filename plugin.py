@@ -24,6 +24,8 @@ import traceback
 from typing import List, Tuple, Type, Optional
 from .generator_tools import generate_rewrite_reply
 from src.plugin_system.apis import send_api  # 新增导入
+import random
+import datetime
 
 # 导入新插件系统
 from src.plugin_system.base.base_plugin import BasePlugin
@@ -37,6 +39,259 @@ logger = get_logger("doubao_pic_plugin")
 
 
 # ===== Action组件 =====
+
+
+# ===== 豆包图片生成API调用工具函数 =====
+def doubao_generate_image_request(
+    get_config_func,
+    prompt: str,
+    model: str,
+    size: str,
+    seed: int,
+    guidance_scale: float,
+    watermark: bool,
+    log_prefix: str = "[doubao_api]"
+) -> Tuple[bool, str]:
+    """平台通用的豆包图片生成API调用"""
+    base_url = get_config_func("api.base_url")
+    generate_api_key = get_config_func("api.volcano_generate_api_key")
+    endpoint = f"{base_url.rstrip('/')}/images/generations"
+    payload_dict = {
+        "model": model,
+        "prompt": prompt,
+        "response_format": "url",
+        "size": size,
+        "guidance_scale": guidance_scale,
+        "watermark": watermark,
+        "seed": seed,
+        "api-key": generate_api_key,
+    }
+    data = json.dumps(payload_dict).encode("utf-8")
+    headers = {
+        "Content-Type": "application/json",
+        "Accept": "application/json",
+        "Authorization": f"Bearer {generate_api_key}",
+    }
+    logger.info(f"{log_prefix} (HTTP) 发起图片请求: {model}, Prompt: {prompt[:30]}... To: {endpoint}")
+    req = urllib.request.Request(endpoint, data=data, headers=headers, method="POST")
+    try:
+        with urllib.request.urlopen(req, timeout=60) as response:
+            response_status = response.status
+            response_body_bytes = response.read()
+            response_body_str = response_body_bytes.decode("utf-8")
+            logger.info(f"{log_prefix} (HTTP) 响应: {response_status}. Preview: {response_body_str[:150]}...")
+            if 200 <= response_status < 300:
+                response_data = json.loads(response_body_str)
+                image_url = None
+                if (
+                    isinstance(response_data.get("data"), list)
+                    and response_data["data"]
+                    and isinstance(response_data["data"][0], dict)
+                ):
+                    image_url = response_data["data"][0].get("url")
+                elif response_data.get("url"):
+                    image_url = response_data.get("url")
+                if image_url:
+                    logger.info(f"{log_prefix} (HTTP) 图片生成成功，URL: {image_url[:70]}...")
+                    return True, image_url
+                else:
+                    logger.error(f"{log_prefix} (HTTP) API成功但无图片URL")
+                    return False, "图片生成API响应成功但未找到图片URL"
+            else:
+                logger.error(f"{log_prefix} (HTTP) API请求失败. 状态: {response.status}")
+                return False, f"图片API请求失败(状态码 {response.status})"
+    except Exception as e:
+        logger.error(f"{log_prefix} (HTTP) 图片生成时意外错误: {e!r}", exc_info=True)
+        traceback.print_exc()
+        return False, f"图片生成HTTP请求时发生意外错误: {str(e)[:100]}"
+
+# ===== 自拍照Action（take_picture风格，复用豆包底层） =====
+class DoubaoTakePictureAction(BaseAction):
+    """自拍照生成Action，复用豆包图片生成能力，采用自拍照prompt风格"""
+
+    focus_activation_type = ActionActivationType.KEYWORD
+    normal_activation_type = ActionActivationType.KEYWORD
+    mode_enable = ChatMode.ALL
+    parallel_action = False
+
+    action_name = "doubao_take_picture"
+    action_description = "生成一张用手机拍摄的自拍照或近照，风格平凡自然"
+    activation_keywords = ["拍张照", "自拍", "发张照片", "看看你", "你的照片"]
+    keyword_case_sensitive = False
+
+    action_parameters = {
+        "name": "自拍照主角名，也就是你人设的名字",
+        "personality": "自拍照主角外貌描述，也就是你的外貌特征描述",
+    }
+
+    action_require = [
+        "当用户想看你的照片时使用",
+        "当用户让你发自拍时使用或想随手拍眼前的场景时使用"
+    ]
+
+    associated_types = ["text", "image"]
+
+    # 自拍照prompt模板
+    DEFAULT_PROMPT_TEMPLATES = [
+        "极其频繁无奇的iPhone自拍照，没有明确的主体或构图感，就是随手一拍的快照照片略带运动模糊，阳光或室内打光不均匀导致的轻微曝光过度，整体呈现出一种刻意的平庸感，就像是从口袋里拿手机时不小心拍到的一张自拍。主角是{name}，{personality}"
+    ]
+
+    _request_cache = {}
+    _cache_max_size = 10
+
+    async def execute(self) -> Tuple[bool, Optional[str]]:
+        logger.info(f"{self.log_prefix} 执行豆包自拍照生成动作")
+
+        # 配置验证
+        http_base_url = self.get_config("api.base_url")
+        http_api_key = self.get_config("api.volcano_generate_api_key")
+
+        if not (http_base_url and http_api_key):
+            error_msg = "抱歉，照片生成功能所需的API配置（如API地址或密钥）不完整，无法提供服务。"
+            await self.send_text(error_msg)
+            logger.error(f"{self.log_prefix} HTTP调用配置缺失: base_url 或 volcano_generate_api_key.")
+            return False, "API配置不完整"
+
+        if http_api_key == "YOUR_DOUBAO_API_KEY_HERE":
+            error_msg = "照片生成功能尚未配置，请设置正确的API密钥。"
+            await self.send_text(error_msg)
+            logger.error(f"{self.log_prefix} API密钥未配置")
+            return False, "API密钥未配置"
+
+        # 让LLM填充参数
+        # 支持自定义描述（如{name}、{personality}等由LLM填充）
+        prompt_vars = self.action_data if hasattr(self, 'action_data') and isinstance(self.action_data, dict) else {}
+        # prompt模板
+        templates = self.get_config("picture.prompt_templates", self.DEFAULT_PROMPT_TEMPLATES)
+        if not templates:
+            templates = self.DEFAULT_PROMPT_TEMPLATES
+        prompt_template = random.choice(templates)
+        try:
+            final_prompt = prompt_template.format(**prompt_vars)
+        except Exception:
+            final_prompt = prompt_template  # 如果LLM没填参数就用原模板
+
+        # 生成参数
+        model = self.get_config("generation.default_model", "doubao-seedream-3-0-t2i-250415")
+        size = self.get_config("generation.default_size", "1024x1024")
+        watermark = self.get_config("generation.default_watermark", True)
+        guidance_scale = self.get_config("generation.default_guidance_scale", 2.5)
+        seed = random.randint(1, 1000000)
+
+        # 检查缓存
+        enable_cache = self.get_config("cache.enabled", True)
+        cache_key = self._get_cache_key(final_prompt, model, size)
+        if enable_cache and cache_key in self._request_cache:
+            cached_result = self._request_cache[cache_key]
+            logger.info(f"{self.log_prefix} 使用缓存的图片结果")
+            await self.send_text("我之前拍过类似的照片，用之前的结果~")
+            send_success = await self._send_image(cached_result)
+            if send_success:
+                await self.send_text("这是我的照片，好看吗？")
+                return True, "照片已发送(缓存)"
+            else:
+                del self._request_cache[cache_key]
+
+        await self.send_text("正在为你拍照，请稍候...")
+
+        try:
+            success, result = await asyncio.to_thread(
+                doubao_generate_image_request,
+                self.get_config,
+                final_prompt,
+                model,
+                size,
+                seed,
+                guidance_scale,
+                watermark,
+                self.log_prefix
+            )
+        except Exception as e:
+            logger.error(f"{self.log_prefix} (HTTP) 异步请求执行失败: {e!r}", exc_info=True)
+            traceback.print_exc()
+            success = False
+            result = f"照片生成服务遇到意外问题: {str(e)[:100]}"
+
+        if success:
+            image_url = result
+            logger.info(f"{self.log_prefix} 图片URL获取成功: {image_url[:70]}... 下载并编码.")
+            try:
+                encode_success, encode_result = await asyncio.to_thread(self._download_and_encode_base64, image_url)
+            except Exception as e:
+                logger.error(f"{self.log_prefix} (B64) 异步下载/编码失败: {e!r}", exc_info=True)
+                traceback.print_exc()
+                encode_success = False
+                encode_result = f"图片下载或编码时发生内部错误: {str(e)[:100]}"
+
+            if encode_success:
+                base64_image_string = encode_result
+                if enable_cache:
+                    self._update_cache(final_prompt, model, size, base64_image_string)
+                send_success = await self._send_image(base64_image_string)
+                if send_success:
+                    await self.send_text("当当当当~这是我刚拍的照片，好看吗？")
+                    return True, f"成功生成照片: {image_url}"
+                else:
+                    await self.send_text("照片生成了，但发送失败了，可能是格式问题...")
+                    return False, "照片发送失败"
+            else:
+                await self.send_text(f"照片下载失败: {encode_result}")
+                return False, encode_result
+        else:
+            await self.send_text(f"哎呀，拍照失败了: {result}")
+            return False, result
+
+    @classmethod
+    def _get_cache_key(cls, description: str, model: str, size: str) -> str:
+        return f"{description[:100]}|{model}|{size}"
+
+    def _update_cache(self, description: str, model: str, size: str, base64_image: str):
+        max_cache_size = self._cache_max_size
+        cache_key = self._get_cache_key(description, model, size)
+        self._request_cache[cache_key] = base64_image
+        if len(self._request_cache) > max_cache_size:
+            oldest_key = next(iter(self._request_cache))
+            del self._request_cache[oldest_key]
+
+    async def _send_image(self, base64_image: str) -> bool:
+        try:
+            chat_stream = self.chat_stream
+            if not chat_stream:
+                logger.error(f"{self.log_prefix} 没有可用的聊天流发送图片")
+                return False
+            if chat_stream.group_info:
+                return await send_api.image_to_group(
+                    image_base64=base64_image,
+                    group_id=chat_stream.group_info.group_id,
+                    platform=chat_stream.platform
+                )
+            else:
+                return await send_api.image_to_user(
+                    image_base64=base64_image,
+                    user_id=chat_stream.user_info.user_id,
+                    platform=chat_stream.platform
+                )
+        except Exception as e:
+            logger.error(f"{self.log_prefix} 发送图片时出错: {e}")
+            return False
+
+    def _download_and_encode_base64(self, image_url: str) -> Tuple[bool, str]:
+        logger.info(f"{self.log_prefix} (B64) 下载并编码自拍照图片: {image_url[:70]}...")
+        try:
+            with urllib.request.urlopen(image_url, timeout=30) as response:
+                if response.status == 200:
+                    image_bytes = response.read()
+                    base64_encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+                    logger.info(f"{self.log_prefix} (B64) 自拍照图片下载编码完成. Base64长度: {len(base64_encoded_image)}")
+                    return True, base64_encoded_image
+                else:
+                    error_msg = f"下载图片失败 (状态: {response.status})"
+                    logger.error(f"{self.log_prefix} (B64) {error_msg} URL: {image_url}")
+                    return False, error_msg
+        except Exception as e:
+            logger.error(f"{self.log_prefix} (B64) 下载或编码自拍照图片时错误: {e!r}", exc_info=True)
+            traceback.print_exc()
+            return False, f"下载或编码图片时发生错误: {str(e)[:100]}"
 
 
 class DoubaoImageGenerationAction(BaseAction):
@@ -203,13 +458,15 @@ class DoubaoImageGenerationAction(BaseAction):
         # 异步请求生成图片
         try:
             success, result = await asyncio.to_thread(
-                self._make_http_image_request,
-                prompt=description,
-                model=default_model,
-                size=image_size,
-                seed=seed_val,
-                guidance_scale=guidance_scale_val,
-                watermark=watermark_val,
+                doubao_generate_image_request,
+                self.get_config,
+                description,
+                default_model,
+                image_size,
+                seed_val,
+                guidance_scale_val,
+                watermark_val,
+                self.log_prefix
             )
         except Exception as e:
             logger.error(f"{self.log_prefix} (HTTP) 异步请求执行失败: {e!r}", exc_info=True)
@@ -219,8 +476,6 @@ class DoubaoImageGenerationAction(BaseAction):
 
         if success:
             image_url = result
-            # print(f"image_url: {image_url}")
-            # print(f"result: {result}")
             logger.info(f"{self.log_prefix} 图片URL获取成功: {image_url[:70]}... 下载并编码.")
 
             try:
@@ -510,14 +765,10 @@ class DoubaoImagePlugin(BasePlugin):
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
         """返回插件包含的组件列表"""
-
-        # 从配置获取组件启用状态
         enable_image_generation = self.get_config("components.enable_image_generation", True)
-
         components = []
-
-        # 添加图片生成Action
         if enable_image_generation:
             components.append((DoubaoImageGenerationAction.get_action_info(), DoubaoImageGenerationAction))
-
+        # 始终注册自拍照Action（如需开关可加配置）
+        components.append((DoubaoTakePictureAction.get_action_info(), DoubaoTakePictureAction))
         return components
