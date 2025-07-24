@@ -22,19 +22,40 @@ import urllib.error
 import base64
 import traceback
 from typing import List, Tuple, Type, Optional
-from .generator_tools import generate_rewrite_reply
+  # 已移除 generator_tools 依赖，直接用 generator_api.rewrite_reply
 from src.plugin_system.apis import send_api  # 新增导入
 import random
 import datetime
 
 # 导入新插件系统
 from src.plugin_system.base.base_plugin import BasePlugin
-from src.plugin_system.base.base_plugin import register_plugin
-from src.plugin_system.base.base_action import BaseAction
-from src.plugin_system.base.component_types import ComponentInfo, ActionActivationType, ChatMode
+from src.plugin_system.apis.plugin_register_api import register_plugin
+from src.plugin_system.base.base_action import BaseAction, ActionActivationType, ChatMode
+from src.plugin_system.base.base_command import BaseCommand
+from src.plugin_system.base.component_types import ComponentInfo
 from src.plugin_system.base.config_types import ConfigField
+from src.plugin_system.apis import generator_api
+from src.plugin_system.apis import database_api
+from src.plugin_system.apis import config_api
+from src.common.database.database_model import Messages, PersonInfo
+from src.person_info.person_info import get_person_info_manager
 from src.common.logger import get_logger
+from PIL import Image
+from typing import Tuple, Dict, Optional, List, Any, Type
+from pathlib import Path
+import traceback
+import tomlkit
+import json
+import random
+import asyncio
+import aiohttp
+import base64
+import toml
+import io
+import os
+import re
 
+  # 已移除 generator_tools 依赖，直接用 generator_api.rewrite_reply
 logger = get_logger("doubao_pic_plugin")
 
 
@@ -403,11 +424,15 @@ class DoubaoImageGenerationAction(BaseAction):
         if cache_key in self._request_cache:
             cached_result = self._request_cache[cache_key]
             logger.info(f"{self.log_prefix} 使用缓存的图片结果")
-            # 用 generator_tools 生成回复
-            result_status, result_message = await generate_rewrite_reply(
+            # 直接调用 generator_api.rewrite_reply 生成回复
+            result_status, result_message = await generator_api.rewrite_reply(
                 chat_stream=self.chat_stream,
-                raw_reply="我之前画过类似的图片，用之前的结果~",
-                reason="图片生成缓存命中，优化表达后发送给用户"
+                reply_data={
+                    "raw_reply": "我之前画过类似的图片，用之前的结果~",
+                    "reason": "图片生成缓存命中，优化表达后发送给用户"
+                },
+                enable_splitter=False,
+                enable_chinese_typo=False
             )
             if result_status:
                 for reply_seg in result_message:
@@ -418,10 +443,14 @@ class DoubaoImageGenerationAction(BaseAction):
                 await self.send_text("我之前画过类似的图片，用之前的结果~")
             send_success = await self._send_image(cached_result)
             if send_success:
-                result_status, result_message = await generate_rewrite_reply(
+                result_status, result_message = await generator_api.rewrite_reply(
                     chat_stream=self.chat_stream,
-                    raw_reply="图片已发送！",
-                    reason="图片已发送，优化表达后发送给用户"
+                    reply_data={
+                        "raw_reply": "图片已发送！",
+                        "reason": "图片已发送，优化表达后发送给用户"
+                    },
+                    enable_splitter=False,
+                    enable_chinese_typo=False
                 )
                 if result_status:
                     for reply_seg in result_message:
@@ -440,10 +469,14 @@ class DoubaoImageGenerationAction(BaseAction):
         seed_val = self._get_seed()
         watermark_val = self._get_watermark()
 
-        result_status, result_message = await generate_rewrite_reply(
+        result_status, result_message = await generator_api.rewrite_reply(
             chat_stream=self.chat_stream,
-            raw_reply=f"收到！正在为您生成关于 '{description}' 的图片，请稍候...（模型: {default_model}, 尺寸: {image_size}）",
-            reason="图片生成请求已收到，优化表达后发送给用户"
+            reply_data={
+                "raw_reply": f"收到！正在为您生成关于 '{description}' 的图片，请稍候...（模型: {default_model}, 尺寸: {image_size}）",
+                "reason": "图片生成请求已收到，优化表达后发送给用户"
+            },
+            enable_splitter=False,
+            enable_chinese_typo=False
         )
         if result_status:
             for reply_seg in result_message:
@@ -492,10 +525,14 @@ class DoubaoImageGenerationAction(BaseAction):
                 if send_success:
                     self._request_cache[cache_key] = base64_image_string
                     self._cleanup_cache()
-                    result_status, result_message = await generate_rewrite_reply(
+                    result_status, result_message = await generator_api.rewrite_reply(
                         chat_stream=self.chat_stream,
-                        raw_reply="图片已成功生成并发送！",
-                        reason="图片生成成功，优化表达后发送给用户"
+                        reply_data={
+                            "raw_reply": "图片已成功生成并发送！",
+                            "reason": "图片生成成功，优化表达后发送给用户"
+                        },
+                        enable_splitter=False,
+                        enable_chinese_typo=False
                     )
                     if result_status:
                         for reply_seg in result_message:
@@ -513,10 +550,14 @@ class DoubaoImageGenerationAction(BaseAction):
                 return False, f"图片处理失败(Base64): {encode_result}"
         else:
             error_message = result
-            result_status, result_message = await generate_rewrite_reply(
+            result_status, result_message = await generator_api.rewrite_reply(
                 chat_stream=self.chat_stream,
-                raw_reply=f"哎呀，生成图片时遇到问题：{error_message}",
-                reason="图片生成失败，优化表达后发送给用户"
+                reply_data={
+                    "raw_reply": f"哎呀，生成图片时遇到问题：{error_message}",
+                    "reason": "图片生成失败，优化表达后发送给用户"
+                },
+                enable_splitter=False,
+                enable_chinese_typo=False
             )
             if result_status:
                 for reply_seg in result_message:
@@ -694,17 +735,16 @@ class DoubaoImageGenerationAction(BaseAction):
 @register_plugin
 class DoubaoImagePlugin(BasePlugin):
     """豆包图片生成插件
-
     基于火山引擎豆包模型的AI图片生成插件：
     - 图片生成Action：根据描述使用火山引擎API生成图片
     """
 
-    # 插件基本信息
-    plugin_name = "doubao_pic_plugin"  # 内部标识符
+    plugin_name = "doubao_pic_plugin"
     enable_plugin = True
     config_file_name = "config.toml"
+    dependencies = []
+    python_dependencies = []
 
-    # 配置节描述
     config_section_descriptions = {
         "plugin": "插件基本信息配置",
         "api": "API相关配置，包含火山引擎API的访问信息",
@@ -713,7 +753,6 @@ class DoubaoImagePlugin(BasePlugin):
         "components": "组件启用配置",
     }
 
-    # 配置Schema定义
     config_schema = {
         "plugin": {
             "name": ConfigField(type=str, default="doubao_pic_plugin", description="插件名称", required=True),
@@ -765,9 +804,8 @@ class DoubaoImagePlugin(BasePlugin):
 
     def get_plugin_components(self) -> List[Tuple[ComponentInfo, Type]]:
         """返回插件包含的组件列表"""
-        enable_image_generation = self.get_config("components.enable_image_generation", True)
         components = []
-        if enable_image_generation:
+        if self.get_config("components.enable_image_generation", True):
             components.append((DoubaoImageGenerationAction.get_action_info(), DoubaoImageGenerationAction))
         # 始终注册自拍照Action（如需开关可加配置）
         components.append((DoubaoTakePictureAction.get_action_info(), DoubaoTakePictureAction))
