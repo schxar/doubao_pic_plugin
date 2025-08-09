@@ -319,8 +319,8 @@ class DoubaoImageGenerationAction(BaseAction):
     """豆包图片生成Action - 根据描述使用火山引擎API生成图片"""
 
     # 激活设置
-    focus_activation_type = ActionActivationType.LLM_JUDGE  # 保持枚举类型
-    normal_activation_type = ActionActivationType.KEYWORD  # 保持枚举类型
+    focus_activation_type = ActionActivationType.ALWAYS  # 保持枚举类型
+    normal_activation_type = ActionActivationType.ALWAYS # 保持枚举类型
     mode_enable = ChatMode.ALL  # 保持枚举类型
     parallel_action = True
 
