@@ -1,3 +1,4 @@
+
 """
 豆包图片生成插件
 
@@ -55,12 +56,56 @@ import io
 import os
 import re
 
+import requests
+
+
+
   # 已移除 generator_tools 依赖，直接用 generator_api.rewrite_reply
 logger = get_logger("doubao_pic_plugin")
 
 
 # ===== Action组件 =====
 
+
+
+def generate_image_by_siliconflow(prompt, image_size="1024x1024", batch_size=1, num_inference_steps=20, guidance_scale=7.5, negative_prompt=None, seed=None, model="Kwai-Kolors/Kolors"):
+    """
+    调用 SiliconFlow API 生成图片。
+    参数均为 API 支持的字段。
+    返回图片 URL 或完整响应。
+    """
+    # 读取 config.toml 获取 API KEY
+    config_path = os.path.join(os.path.dirname(__file__), "config.toml")
+    config = toml.load(config_path)
+    api_key = config.get("api", {}).get("SILICONFLOW_KEY")
+    if not api_key:
+        raise ValueError("SILICONFLOW_KEY 未配置")
+
+    url = "https://api.siliconflow.cn/v1/images/generations"
+    headers = {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json"
+    }
+    data = {
+        "model": model,
+        "prompt": prompt,
+        "image_size": image_size,
+        "batch_size": batch_size,
+        "num_inference_steps": num_inference_steps,
+        "guidance_scale": guidance_scale
+    }
+    if negative_prompt:
+        data["negative_prompt"] = negative_prompt
+    if seed is not None:
+        data["seed"] = seed
+
+    resp = requests.post(url, headers=headers, json=data)
+    resp.raise_for_status()
+    result = resp.json()
+    # 返回图片 URL 或完整响应
+    if "images" in result and result["images"]:
+        return result["images"][0]["url"]
+    return result
 
 # ===== 豆包图片生成API调用工具函数 =====
 def doubao_generate_image_request(
@@ -125,6 +170,187 @@ def doubao_generate_image_request(
         logger.error(f"{log_prefix} (HTTP) 图片生成时意外错误: {e!r}", exc_info=True)
         traceback.print_exc()
         return False, f"图片生成HTTP请求时发生意外错误: {str(e)[:100]}"
+    
+# ===== SiliconFlow图片生成Action =====
+
+class SiliconFlowImageGenerationAction(BaseAction):
+    """SiliconFlow图片生成Action - 根据描述使用SiliconFlow API生成图片"""
+
+    focus_activation_type = ActionActivationType.LLM_JUDGE
+    normal_activation_type = ActionActivationType.LLM_JUDGE
+    mode_enable = ChatMode.ALL
+    parallel_action = True
+
+    action_name = "siliconflow_image_generation"
+    action_description = (
+        "可以根据特定描述，使用SiliconFlow模型生成并发送一张图片。如果没提供描述，就根据聊天内容生成。"
+    )
+    activation_keywords = ["siliconflow画", "sf画", "kolors画", "kolors图片", "siliconflow图片", "kolors生成"]
+    keyword_case_sensitive = False
+
+    llm_judge_prompt = """
+判定是否需要使用SiliconFlow图片生成动作的条件：
+1. 用户明确要求画图、生成图片或创作图像
+2. 用户描述了想要看到的画面或场景
+3. 对话中提到需要视觉化展示某些概念
+4. 用户想要创意图片或艺术作品
+"""
+
+    # 动作参数定义，只保留 description 和 size
+    action_parameters = {
+        "description": "图片描述，输入你想要生成并发送的图片的描述，必填",
+        "size": "图片尺寸，例如 '1024x1024' (可选, 默认从配置或 '1024x1024')",
+    }
+
+    action_require = [
+        "当有人让你用SiliconFlow/Kolors模型画东西时使用",
+        "当有人要求你生成并发送一张图片时使用",
+        "当有人让你画一张图时使用",
+    ]
+
+    associated_types = ["image", "text"]
+
+    _request_cache = {}
+    _cache_max_size = 10
+
+    async def execute(self) -> tuple:
+        logger.info(f"{self.log_prefix} 执行SiliconFlow图片生成动作")
+        description = self.action_data.get("description")
+        if not description or not description.strip():
+            await self.send_text("你需要告诉我想要画什么样的图片哦~ 比如说'画一只可爱的小猫'")
+            return False, "图片描述为空"
+        description = description.strip()
+        image_size = self.action_data.get("size", self._get_config_value("generation.default_size", "1024x1024"))
+
+        # guidance_scale 和 seed 从 config.toml 读取
+        guidance_scale = self._get_config_value("generation.default_guidance_scale", 2.5)
+        seed = self._get_config_value("generation.default_seed", 42)
+        batch_size = 1  # 默认生成一张
+        num_inference_steps = 20  # 默认20步
+
+        # 检查缓存
+        cache_key = f"{description[:100]}|{image_size}|{guidance_scale}|{num_inference_steps}|{batch_size}|{seed}"
+        if cache_key in self._request_cache:
+            cached_result = self._request_cache[cache_key]
+            await self.send_text("我之前画过类似的图片，用之前的结果~")
+            send_success = await self._send_image(cached_result)
+            if send_success:
+                await self.send_text("图片已发送！")
+                return True, "图片已发送(缓存)"
+            else:
+                del self._request_cache[cache_key]
+
+        await self.send_text(f"收到！正在为您生成关于 '{description}' 的图片，请稍候...（SiliconFlow模型）")
+        try:
+            image_url = await asyncio.to_thread(
+                generate_image_by_siliconflow,
+                description,
+                image_size,
+                batch_size,
+                num_inference_steps,
+                guidance_scale,
+                None,
+                seed,
+                "Kwai-Kolors/Kolors"
+            )
+        except Exception as e:
+            logger.error(f"{self.log_prefix} SiliconFlow API请求失败: {e!r}", exc_info=True)
+            await self.send_text(f"图片生成服务遇到意外问题: {str(e)[:100]}")
+            return False, f"图片生成失败: {str(e)[:100]}"
+
+        if image_url:
+            try:
+                encode_success, encode_result = await asyncio.to_thread(self._download_and_encode_base64, image_url)
+            except Exception as e:
+                logger.error(f"{self.log_prefix} (B64) 异步下载/编码失败: {e!r}", exc_info=True)
+                await self.send_text(f"图片下载或编码时发生内部错误: {str(e)[:100]}")
+                return False, f"图片下载或编码失败: {str(e)[:100]}"
+            if encode_success:
+                base64_image_string = encode_result
+                send_success = await self._send_image(base64_image_string)
+                if send_success:
+                    self._request_cache[cache_key] = base64_image_string
+                    self._cleanup_cache()
+                    await self.send_text("图片已成功生成并发送！")
+                    return True, "图片已成功生成并发送"
+                else:
+                    await self.send_text("图片已处理为Base64，但发送失败了。")
+                    return False, "图片发送失败 (Base64)"
+            else:
+                await self.send_text(f"获取到图片URL，但在处理图片时失败了：{encode_result}")
+                return False, f"图片处理失败(Base64): {encode_result}"
+        else:
+            await self.send_text("图片生成失败，未获取到图片URL")
+            return False, "图片生成失败，未获取到图片URL"
+
+    def _get_config_value(self, key, default=None):
+        # 读取 config.toml 的指定 key，支持嵌套 key，如 generation.default_guidance_scale
+        import os, toml
+        config_path = os.path.join(os.path.dirname(__file__), "config.toml")
+        try:
+            config = toml.load(config_path)
+        except Exception:
+            config = {}
+        keys = key.split('.')
+        value = config
+        for k in keys:
+            if isinstance(value, dict) and k in value:
+                value = value[k]
+            else:
+                return default
+        return value if value is not None else default
+
+    @classmethod
+    def _cleanup_cache(cls):
+        if len(cls._request_cache) > cls._cache_max_size:
+            keys_to_remove = list(cls._request_cache.keys())[: -cls._cache_max_size // 2]
+            for key in keys_to_remove:
+                del cls._request_cache[key]
+
+    async def _send_image(self, base64_image: str) -> bool:
+        """发送图片（与豆包图片生成一致）"""
+        try:
+            chat_stream = self.chat_stream
+            if not chat_stream:
+                logger.error(f"{self.log_prefix} 没有可用的聊天流发送图片")
+                return False
+            if chat_stream.group_info:
+                # 群聊
+                return await send_api.image_to_group(
+                    image_base64=base64_image,
+                    group_id=chat_stream.group_info.group_id,
+                    platform=chat_stream.platform
+                )
+            else:
+                # 私聊
+                return await send_api.image_to_user(
+                    image_base64=base64_image,
+                    user_id=chat_stream.user_info.user_id,
+                    platform=chat_stream.platform
+                )
+        except Exception as e:
+            logger.error(f"{self.log_prefix} 发送图片时出错: {e}")
+            return False
+
+    def _download_and_encode_base64(self, image_url: str) -> tuple:
+        """下载图片并将其编码为Base64字符串（与豆包图片生成一致）"""
+        logger.info(f"{self.log_prefix} (B64) 下载并编码图片: {image_url[:70]}...")
+        try:
+            with urllib.request.urlopen(image_url, timeout=30) as response:
+                if response.status == 200:
+                    image_bytes = response.read()
+                    base64_encoded_image = base64.b64encode(image_bytes).decode("utf-8")
+                    logger.info(f"{self.log_prefix} (B64) 图片下载编码完成. Base64长度: {len(base64_encoded_image)}")
+                    return True, base64_encoded_image
+                else:
+                    error_msg = f"下载图片失败 (状态: {response.status})"
+                    logger.error(f"{self.log_prefix} (B64) {error_msg} URL: {image_url}")
+                    return False, error_msg
+        except Exception as e:
+            logger.error(f"{self.log_prefix} (B64) 下载或编码时错误: {e!r}", exc_info=True)
+            traceback.print_exc()
+            return False, f"下载或编码图片时发生错误: {str(e)[:100]}"
+
 
 # ===== 自拍照Action（take_picture风格，复用豆包底层） =====
 class DoubaoTakePictureAction(BaseAction):
@@ -319,8 +545,8 @@ class DoubaoImageGenerationAction(BaseAction):
     """豆包图片生成Action - 根据描述使用火山引擎API生成图片"""
 
     # 激活设置
-    focus_activation_type = ActionActivationType.ALWAYS  # 保持枚举类型
-    normal_activation_type = ActionActivationType.ALWAYS # 保持枚举类型
+    focus_activation_type = ActionActivationType.LLM_JUDGE  # 保持枚举类型
+    normal_activation_type = ActionActivationType.LLM_JUDGE # 保持枚举类型
     mode_enable = ChatMode.ALL  # 保持枚举类型
     parallel_action = True
 
@@ -772,6 +998,9 @@ class DoubaoImagePlugin(BasePlugin):
             "volcano_generate_api_key": ConfigField(
                 type=str, default="YOUR_DOUBAO_API_KEY_HERE", description="火山引擎豆包API密钥", required=True
             ),
+            "SILICONFLOW_KEY": ConfigField(
+                type=str, default="YOUR_KEY_HERE", description="SiliconFlow API密钥"
+            ),
         },
         "generation": {
             "default_model": ConfigField(
@@ -798,7 +1027,9 @@ class DoubaoImagePlugin(BasePlugin):
             "max_size": ConfigField(type=int, default=10, description="最大缓存数量"),
         },
         "components": {
-            "enable_image_generation": ConfigField(type=bool, default=True, description="是否启用图片生成Action")
+            "enable_image_generation": ConfigField(type=bool, default=True, description="是否启用图片生成Action"),
+            "enable_DoubaoTakePictureAction": ConfigField(type=bool, default=True, description="是否启用DoubaoTakePictureAction"),
+            "enable_kolors_image_generation": ConfigField(type=bool, default=False, description="是否启用Kolors图片生成Action"),
         },
     }
 
@@ -807,6 +1038,10 @@ class DoubaoImagePlugin(BasePlugin):
         components = []
         if self.get_config("components.enable_image_generation", True):
             components.append((DoubaoImageGenerationAction.get_action_info(), DoubaoImageGenerationAction))
-        # 始终注册自拍照Action（如需开关可加配置）
-        components.append((DoubaoTakePictureAction.get_action_info(), DoubaoTakePictureAction))
+        # 新增：根据 enable_kolors_image_generation 配置决定是否注册 SiliconFlowImageGenerationAction
+        if self.get_config("components.enable_kolors_image_generation", False):
+            components.append((SiliconFlowImageGenerationAction.get_action_info(), SiliconFlowImageGenerationAction))
+        # 新增：根据 enable_DoubaoTakePictureAction 配置决定是否注册 DoubaoTakePictureAction
+        if self.get_config("components.enable_DoubaoTakePictureAction", True):
+            components.append((DoubaoTakePictureAction.get_action_info(), DoubaoTakePictureAction))
         return components
