@@ -314,20 +314,10 @@ class SiliconFlowImageGenerationAction(BaseAction):
             if not chat_stream:
                 logger.error(f"{self.log_prefix} 没有可用的聊天流发送图片")
                 return False
-            if chat_stream.group_info:
-                # 群聊
-                return await send_api.image_to_group(
-                    image_base64=base64_image,
-                    group_id=chat_stream.group_info.group_id,
-                    platform=chat_stream.platform
-                )
-            else:
-                # 私聊
-                return await send_api.image_to_user(
-                    image_base64=base64_image,
-                    user_id=chat_stream.user_info.user_id,
-                    platform=chat_stream.platform
-                )
+            return await send_api.image_to_stream(
+                image_base64=base64_image,
+                stream_id=chat_stream.stream_id
+            )
         except Exception as e:
             logger.error(f"{self.log_prefix} 发送图片时出错: {e}")
             return False
@@ -506,18 +496,10 @@ class DoubaoTakePictureAction(BaseAction):
             if not chat_stream:
                 logger.error(f"{self.log_prefix} 没有可用的聊天流发送图片")
                 return False
-            if chat_stream.group_info:
-                return await send_api.image_to_group(
-                    image_base64=base64_image,
-                    group_id=chat_stream.group_info.group_id,
-                    platform=chat_stream.platform
-                )
-            else:
-                return await send_api.image_to_user(
-                    image_base64=base64_image,
-                    user_id=chat_stream.user_info.user_id,
-                    platform=chat_stream.platform
-                )
+            return await send_api.image_to_stream(
+                image_base64=base64_image,
+                stream_id=chat_stream.stream_id
+            )
         except Exception as e:
             logger.error(f"{self.log_prefix} 发送图片时出错: {e}")
             return False
@@ -833,20 +815,10 @@ class DoubaoImageGenerationAction(BaseAction):
             if not chat_stream:
                 logger.error(f"{self.log_prefix} 没有可用的聊天流发送图片")
                 return False
-            if chat_stream.group_info:
-                # 群聊
-                return await send_api.image_to_group(
-                    image_base64=base64_image,
-                    group_id=chat_stream.group_info.group_id,
-                    platform=chat_stream.platform
-                )
-            else:
-                # 私聊
-                return await send_api.image_to_user(
-                    image_base64=base64_image,
-                    user_id=chat_stream.user_info.user_id,
-                    platform=chat_stream.platform
-                )
+            return await send_api.image_to_stream(
+                image_base64=base64_image,
+                stream_id=chat_stream.stream_id
+            )
         except Exception as e:
             logger.error(f"{self.log_prefix} 发送图片时出错: {e}")
             return False
