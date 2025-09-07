@@ -31,7 +31,7 @@ import datetime
 # 导入新插件系统
 from src.plugin_system.base.base_plugin import BasePlugin
 from src.plugin_system.apis.plugin_register_api import register_plugin
-from src.plugin_system.base.base_action import BaseAction, ActionActivationType, ChatMode
+from src.plugin_system.base.base_action import BaseAction, ActionActivationType
 from src.plugin_system.base.base_command import BaseCommand
 from src.plugin_system.base.component_types import ComponentInfo
 from src.plugin_system.base.config_types import ConfigField
@@ -178,7 +178,7 @@ class SiliconFlowImageGenerationAction(BaseAction):
 
     focus_activation_type = ActionActivationType.LLM_JUDGE
     normal_activation_type = ActionActivationType.LLM_JUDGE
-    mode_enable = ChatMode.ALL
+
     parallel_action = True
 
     action_name = "siliconflow_image_generation"
@@ -348,7 +348,7 @@ class DoubaoTakePictureAction(BaseAction):
 
     focus_activation_type = ActionActivationType.KEYWORD
     normal_activation_type = ActionActivationType.KEYWORD
-    mode_enable = ChatMode.ALL
+     
     parallel_action = False
 
     action_name = "doubao_take_picture"
@@ -529,7 +529,7 @@ class DoubaoImageGenerationAction(BaseAction):
     # 激活设置
     focus_activation_type = ActionActivationType.LLM_JUDGE  # 保持枚举类型
     normal_activation_type = ActionActivationType.LLM_JUDGE # 保持枚举类型
-    mode_enable = ChatMode.ALL  # 保持枚举类型
+       # 保持枚举类型
     parallel_action = True
 
     # 动作基本信息
@@ -633,7 +633,7 @@ class DoubaoImageGenerationAction(BaseAction):
             cached_result = self._request_cache[cache_key]
             logger.info(f"{self.log_prefix} 使用缓存的图片结果")
             # 直接调用 generator_api.rewrite_reply 生成回复
-            status, rewrite_result, error_message = await generator_api.rewrite_reply(
+            status, llm_response = await generator_api.rewrite_reply(
                 chat_stream=self.chat_stream,
                 reply_data={
                     "raw_reply": "我之前画过类似的图片，用之前的结果~",
@@ -642,17 +642,16 @@ class DoubaoImageGenerationAction(BaseAction):
                 enable_splitter=False,
                 enable_chinese_typo=False
             )
-            if status and rewrite_result:
-                for reply_seg in rewrite_result:
+            if status and llm_response and llm_response.reply_set:
+                for reply_seg in llm_response.reply_set:
                     data = reply_seg[1]
                     await self.send_text(data)
                     await asyncio.sleep(1.0)
             else:
-                error_msg = error_message if error_message else "我之前画过类似的图片，用之前的结果~"
-                await self.send_text(error_msg)
+                await self.send_text("我之前画过类似的图片，用之前的结果~")
             send_success = await self._send_image(cached_result)
             if send_success:
-                result_status, result_message = await generator_api.rewrite_reply(
+                result_status, llm_response = await generator_api.rewrite_reply(
                     chat_stream=self.chat_stream,
                     reply_data={
                         "raw_reply": "图片已发送！",
@@ -661,8 +660,8 @@ class DoubaoImageGenerationAction(BaseAction):
                     enable_splitter=False,
                     enable_chinese_typo=False
                 )
-                if result_status:
-                    for reply_seg in result_message:
+                if result_status and llm_response and llm_response.reply_set:
+                    for reply_seg in llm_response.reply_set:
                         data = reply_seg[1]
                         await self.send_text(data)
                         await asyncio.sleep(1.0)
@@ -678,7 +677,7 @@ class DoubaoImageGenerationAction(BaseAction):
         seed_val = self._get_seed()
         watermark_val = self._get_watermark()
 
-        status, rewrite_result, error_message = await generator_api.rewrite_reply(
+        status, llm_response = await generator_api.rewrite_reply(
             chat_stream=self.chat_stream,
             reply_data={
                 "raw_reply": f"收到！正在为您生成关于 '{description}' 的图片，请稍候...（模型: {default_model}, 尺寸: {image_size}）",
@@ -687,8 +686,8 @@ class DoubaoImageGenerationAction(BaseAction):
             enable_splitter=False,
             enable_chinese_typo=False
         )
-        if status and rewrite_result:
-            for reply_seg in rewrite_result:
+        if status and llm_response and llm_response.reply_set:
+            for reply_seg in llm_response.reply_set:
                 data = reply_seg[1]
                 await self.send_text(data)
                 await asyncio.sleep(1.0)
@@ -733,7 +732,7 @@ class DoubaoImageGenerationAction(BaseAction):
                 if send_success:
                     self._request_cache[cache_key] = base64_image_string
                     self._cleanup_cache()
-                    status, rewrite_result, error_message = await generator_api.rewrite_reply(
+                    status, llm_response = await generator_api.rewrite_reply(
                         chat_stream=self.chat_stream,
                         reply_data={
                             "raw_reply": "图片已成功生成并发送！",
@@ -742,13 +741,13 @@ class DoubaoImageGenerationAction(BaseAction):
                         enable_splitter=False,
                         enable_chinese_typo=False
                     )
-                    if status and rewrite_result:
-                        for reply_seg in rewrite_result:
+                    if status and llm_response and llm_response.reply_set:
+                        for reply_seg in llm_response.reply_set:
                             data = reply_seg[1]
                             await self.send_text(data)
                             await asyncio.sleep(1.0)
                     else:
-                        error_msg = error_message if error_message else "图片已成功生成并发送！"
+                        await self.send_text("图片已成功生成并发送！")
                         await self.send_text(error_msg)
                     return True, "图片已成功生成并发送"
                 else:
@@ -759,7 +758,7 @@ class DoubaoImageGenerationAction(BaseAction):
                 return False, f"图片处理失败(Base64): {encode_result}"
         else:
             error_message = result
-            status, rewrite_result, error_msg = await generator_api.rewrite_reply(
+            status, llm_response = await generator_api.rewrite_reply(
                 chat_stream=self.chat_stream,
                 reply_data={
                     "raw_reply": f"哎呀，生成图片时遇到问题：{error_message}",
@@ -768,14 +767,13 @@ class DoubaoImageGenerationAction(BaseAction):
                 enable_splitter=False,
                 enable_chinese_typo=False
             )
-            if status and rewrite_result:
-                for reply_seg in rewrite_result:
+            if status and llm_response and llm_response.reply_set:
+                for reply_seg in llm_response.reply_set:
                     data = reply_seg[1]
                     await self.send_text(data)
                     await asyncio.sleep(1.0)
             else:
-                fail_msg = error_msg if error_msg else f"哎呀，生成图片时遇到问题：{error_message}"
-                await self.send_text(fail_msg)
+                await self.send_text(f"哎呀，生成图片时遇到问题：{error_message}")
             return False, f"图片生成失败: {error_message}"
 
     def _get_guidance_scale(self) -> float:
